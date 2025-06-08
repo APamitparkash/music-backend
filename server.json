@@ -1,9 +1,9 @@
 {
   "name": "music-backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "backblaze-b2": "^3.0.0",
