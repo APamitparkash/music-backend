@@ -7,59 +7,65 @@ const app = express();
 app.use(cors());
 
 const b2 = new B2({
-  applicationKeyId: process.env.B2_KEY_ID,
-  applicationKey: process.env.B2_APP_KEY,
-  bucketId: process.env.B2_BUCKET_ID
+  applicationKeyId: process.env.B2_APPLICATION_KEY_ID,
+  applicationKey: process.env.B2_APPLICATION_KEY
 });
+
+// Initialize B2 connection
+let b2Authorized = false;
+
+const authorizeB2 = async () => {
+  if (!b2Authorized) {
+    await b2.authorize();
+    b2Authorized = true;
+  }
+};
 
 // Search endpoint
 app.get('/api/search', async (req, res) => {
   try {
-    await b2.authorize();
+    await authorizeB2();
+    
+    const query = req.query.query || '';
     const response = await b2.listFileNames({
       bucketId: process.env.B2_BUCKET_ID,
-      prefix: req.query.query,
-      maxFileCount: 100,
-      delimiter: ''
+      prefix: query,
+      maxFileCount: 100
     });
     
-    const files = response.data.files.map(file => ({
+    const songs = response.data.files.map(file => ({
       fileId: file.fileId,
       fileName: file.fileName,
       contentLength: file.contentLength,
       contentType: file.contentType
     }));
     
-    res.json(files);
+    res.json(songs);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to search files' });
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to search songs' });
   }
 });
 
 // Stream endpoint
 app.get('/api/stream/:fileId', async (req, res) => {
   try {
-    await b2.authorize();
-    const response = await b2.getDownloadUrl({
-      fileId: req.params.fileId,
-      bucketName: process.env.B2_BUCKET_NAME
+    await authorizeB2();
+    
+    const fileId = req.params.fileId;
+    const response = await b2.getDownloadAuthorization({
+      bucketId: process.env.B2_BUCKET_ID,
+      fileNamePrefix: '',
+      validDurationInSeconds: 3600, // 1 hour
+      fileId
     });
     
-    res.json({ url: response.data.downloadUrl });
+    const downloadUrl = `${response.data.downloadUrl}/file/${process.env.B2_BUCKET_NAME}/${fileId}`;
+    res.json({ url: downloadUrl });
   } catch (error) {
-    console.error(error);
+    console.error('Stream error:', error);
     res.status(500).json({ error: 'Failed to get stream URL' });
   }
-});
-
-app.get('/healthz', (req, res) => {
-  res.status(200).send('OK');
-});
-
-app.get('/api/stream/:fileId', (req, res) => {
-  res.setHeader('Cache-Control', 'public, max-age=3600'); // 1-hour cache
-  // ... rest of your code
 });
 
 const PORT = process.env.PORT || 3000;
