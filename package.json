@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "backblaze-b2": "^3.0.0",
+    "backblaze-b2": "^4.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "express": "^4.18.2"
