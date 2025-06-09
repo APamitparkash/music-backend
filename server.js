@@ -2,72 +2,83 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const B2 = require('backblaze-b2');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-// Enhanced Backblaze B2 configuration
-const B2_ACCOUNT_ID = process.env.B2_ACCOUNT_ID;
-const B2_APPLICATION_KEY = process.env.B2_APPLICATION_KEY;
+// Backblaze B2 Configuration
+const b2 = new B2({
+  applicationKeyId: process.env.B2_KEY_ID || process.env.B2_ACCOUNT_ID,
+  applicationKey: process.env.B2_APP_KEY || process.env.B2_APPLICATION_KEY,
+});
+
+// Environment variables
 const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME;
 const B2_BUCKET_ID = process.env.B2_BUCKET_ID;
-const B2_ENDPOINT = process.env.B2_ENDPOINT || 'https://api.backblazeb2.com';
+const CACHE_TTL = process.env.CACHE_TTL || 3600; // 1 hour cache
 
-// Cache for B2 authorization
-let authToken = '';
-let apiUrl = '';
-let downloadUrl = '';
+// Cache implementation
+let cache = {
+  auth: null,
+  authExpiry: null,
+  files: null,
+  filesExpiry: null
+};
 
-// Improved authorization function with error handling
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    services: {
+      backblaze: cache.auth ? 'connected' : 'disconnected'
+    }
+  });
+});
+
+// Helper function to authorize with B2
 async function authorizeB2() {
   try {
-    const authString = Buffer.from(`${B2_ACCOUNT_ID}:${B2_APPLICATION_KEY}`).toString('base64');
-    const response = await axios.get(`${B2_ENDPOINT}/b2api/v2/b2_authorize_account`, {
-      headers: { Authorization: `Basic ${authString}` },
-      timeout: 5000
-    });
-    
-    authToken = response.data.authorizationToken;
-    apiUrl = response.data.apiUrl;
-    downloadUrl = response.data.downloadUrl;
-    return response.data;
+    // Use cached auth if available and not expired
+    if (cache.auth && cache.authExpiry > Date.now()) {
+      return cache.auth;
+    }
+
+    const auth = await b2.authorize();
+    cache.auth = auth;
+    cache.authExpiry = Date.now() + (CACHE_TTL * 1000);
+    return auth;
   } catch (error) {
     console.error('B2 Authorization failed:', error.message);
     throw new Error('Failed to authenticate with Backblaze B2');
   }
 }
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-});
-
-// Enhanced search endpoint
+// Search endpoint using B2 SDK
 app.get('/api/search', async (req, res) => {
   try {
     const { query } = req.query;
     if (!query) {
       return res.status(400).json({ error: 'Query parameter is required' });
     }
-    
-    if (!authToken) await authorizeB2();
-    
-    const response = await axios.post(`${apiUrl}/b2api/v2/b2_list_file_names`, {
+
+    await authorizeB2();
+
+    const response = await b2.listFileNames({
       bucketId: B2_BUCKET_ID,
-      maxFileCount: 1000,
-      prefix: query.trim().toLowerCase()
-    }, {
-      headers: { Authorization: authToken },
-      timeout: 10000
+      prefix: query.trim().toLowerCase(),
+      maxFileCount: 100
     });
-    
+
     const files = response.data.files.map(file => ({
-      id: file.fileId,
-      name: file.fileName,
+      fileId: file.fileId,
+      fileName: file.fileName,
       size: file.contentLength,
       uploadTimestamp: file.uploadTimestamp
     }));
-    
+
     res.json(files);
   } catch (error) {
     console.error('Search error:', error.message);
@@ -78,7 +89,53 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// Improved streaming endpoint
+// Get all songs endpoint
+app.get('/api/songs', async (req, res) => {
+  try {
+    await authorizeB2();
+
+    // Use cached files if available and not expired
+    if (cache.files && cache.filesExpiry > Date.now()) {
+      return res.json(cache.files);
+    }
+
+    const response = await b2.listFileNames({
+      bucketId: B2_BUCKET_ID,
+      maxFileCount: 1000
+    });
+
+    // Generate signed URLs for each file
+    const songs = await Promise.all(
+      response.data.files.map(async (file) => {
+        const downloadUrl = await b2.getDownloadUrl({
+          bucketId: B2_BUCKET_ID,
+          fileName: file.fileName,
+        });
+        return {
+          fileId: file.fileId,
+          fileName: file.fileName,
+          size: file.contentLength,
+          uploadTimestamp: file.uploadTimestamp,
+          url: `${downloadUrl.data.downloadUrl}?Authorization=${downloadUrl.data.authorizationToken}`,
+        };
+      })
+    );
+
+    // Cache the results
+    cache.files = songs;
+    cache.filesExpiry = Date.now() + (CACHE_TTL * 1000);
+
+    res.json(songs);
+  } catch (error) {
+    console.error('Error fetching songs:', error.message);
+    res.status(500).json({ 
+      error: 'Error fetching songs',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Streaming endpoint with multiple options
 app.get('/api/stream/:fileId', async (req, res) => {
   try {
     const { fileId } = req.params;
@@ -88,29 +145,20 @@ app.get('/api/stream/:fileId', async (req, res) => {
       return res.status(400).json({ error: 'File ID is required' });
     }
     
-    if (!authToken) await authorizeB2();
-    
-    // Option 1: Use public URL if bucket is public
-    // const publicUrl = `${downloadUrl}/file/${B2_BUCKET_NAME}/${fileId}`;
-    // return res.json({ url: publicUrl });
-    
-    // Option 2: Generate authorized download URL (for private buckets)
-    const response = await axios.post(`${apiUrl}/b2api/v2/b2_get_download_authorization`, {
+    await authorizeB2();
+
+    // Option 1: Get download authorization
+    const downloadUrl = await b2.getDownloadUrl({
       bucketId: B2_BUCKET_ID,
-      fileNamePrefix: fileId,
-      validDurationInSeconds: 86400, // 24 hours
-      b2ContentDisposition: filename ? `inline; filename="${encodeURIComponent(filename)}"` : 'inline'
-    }, {
-      headers: { Authorization: authToken },
-      timeout: 10000
+      fileName: fileId,
     });
-    
-    const downloadAuthToken = response.data.authorizationToken;
-    const streamUrl = `${downloadUrl}/file/${B2_BUCKET_NAME}/${fileId}?Authorization=${downloadAuthToken}`;
+
+    const streamUrl = `${downloadUrl.data.downloadUrl}?Authorization=${downloadUrl.data.authorizationToken}`;
     
     res.json({ 
       url: streamUrl,
-      expiresAt: new Date(Date.now() + 86400 * 1000).toISOString()
+      expiresAt: new Date(Date.now() + 86400 * 1000).toISOString(),
+      filename: filename || fileId
     });
     
   } catch (error) {
@@ -125,11 +173,31 @@ app.get('/api/stream/:fileId', async (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err.stack);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ 
+    error: 'Internal server error',
+    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Backblaze B2 Bucket: ${B2_BUCKET_NAME}`);
+  
+  try {
+    await authorizeB2();
+    console.log(`Connected to Backblaze B2 Bucket: ${B2_BUCKET_NAME}`);
+  } catch (error) {
+    console.error('Failed to connect to Backblaze B2:', error.message);
+  }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Shutting down gracefully');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received. Shutting down gracefully');
+  process.exit(0);
 });
