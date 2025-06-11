@@ -50,20 +50,26 @@ app.get('/api/search', async (req, res) => {
       headers: { Authorization: authToken }
     });
     
-    const files = response.data.files.filter(file => 
-      file.fileName.toLowerCase().includes(query.toLowerCase()) && 
-      file.fileName.endsWith('.mp3')
-    ).map(file => ({
-      fileId: file.fileId,
-      fileName: file.fileName,
-      contentLength: file.contentLength,
-      contentType: file.contentType
-    }));
+    const files = response.data.files
+      .filter(file => 
+        file.fileName.toLowerCase().includes(query.toLowerCase()) && 
+        file.fileName.endsWith('.mp3')
+      )
+      .map(file => ({
+        fileId: file.fileId,
+        fileName: file.fileName,
+        contentLength: file.contentLength,
+        contentType: file.contentType
+      }));
     
     res.json(files);
   } catch (error) {
     console.error('Search error:', error);
-    res.status(500).json({ error: error.message || 'Failed to search songs' });
+    res.status(500).json({ 
+      error: error.response?.data?.message || 
+            error.message || 
+            'Failed to search songs' 
+    });
   }
 });
 
@@ -102,7 +108,11 @@ app.get('/api/stream/:fileId', async (req, res) => {
     res.json({ url: downloadUrl });
   } catch (error) {
     console.error('Stream error:', error);
-    res.status(500).json({ error: error.message || 'Failed to get stream URL' });
+    res.status(500).json({ 
+      error: error.response?.data?.message || 
+            error.message || 
+            'Failed to get stream URL' 
+    });
   }
 });
 
