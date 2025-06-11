@@ -7,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Backblaze B2 configuration
 const B2_ACCOUNT_ID = process.env.B2_ACCOUNT_ID;
 const B2_APPLICATION_KEY = process.env.B2_APPLICATION_KEY;
 const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME;
@@ -32,7 +31,6 @@ async function authorizeB2() {
   }
 }
 
-// Search endpoint
 app.get('/api/search', async (req, res) => {
   try {
     const { query } = req.query;
@@ -66,14 +64,12 @@ app.get('/api/search', async (req, res) => {
   } catch (error) {
     console.error('Search error:', error);
     res.status(500).json({ 
-      error: error.response?.data?.message || 
-            error.message || 
-            'Failed to search songs' 
+      error: 'Failed to search songs',
+      details: error.response?.data?.message || error.message 
     });
   }
 });
 
-// Stream endpoint
 app.get('/api/stream/:fileId', async (req, res) => {
   try {
     const { fileId } = req.params;
@@ -83,45 +79,54 @@ app.get('/api/stream/:fileId', async (req, res) => {
     }
     
     if (!authToken) await authorizeB2();
-    
-    // First get file info to get the correct fileName
+
     const fileInfo = await axios.post(`${apiUrl}/b2api/v2/b2_get_file_info`, {
       fileId: fileId
     }, {
       headers: { Authorization: authToken }
     });
-    
+
     const fileName = fileInfo.data.fileName;
-    
-    // Get download authorization
+    const bucketName = fileInfo.data.bucketName;
+
     const authResponse = await axios.post(`${apiUrl}/b2api/v2/b2_get_download_authorization`, {
       bucketId: B2_BUCKET_ID,
       fileNamePrefix: fileName,
-      validDurationInSeconds: 3600
+      validDurationInSeconds: 3600,
+      b2ContentDisposition: `inline; filename="${fileName}"`
     }, {
       headers: { Authorization: authToken }
     });
+
+    const downloadUrl = `${authResponse.data.downloadUrl}/file/${bucketName}/${encodeURIComponent(fileName)}?Authorization=${authResponse.data.authorizationToken}`;
+
+    // Verify URL works
+    await axios.head(downloadUrl);
     
-    const downloadAuthToken = authResponse.data.authorizationToken;
-    const downloadUrl = `https://f002.backblazeb2.com/file/${B2_BUCKET_NAME}/${encodeURIComponent(fileName)}?Authorization=${downloadAuthToken}`;
-    
-    res.json({ url: downloadUrl });
+    res.json({ 
+      url: downloadUrl,
+      fileName: fileName 
+    });
   } catch (error) {
-    console.error('Stream error:', error);
+    console.error('Stream error:', error.response?.data || error.message);
     res.status(500).json({ 
-      error: error.response?.data?.message || 
-            error.message || 
-            'Failed to get stream URL' 
+      error: 'Failed to get stream URL',
+      details: error.response?.data?.message || error.message,
+      suggestion: 'Please check if the file exists and permissions are correct'
     });
   }
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK' });
+  res.status(200).json({ 
+    status: 'OK',
+    bucket: B2_BUCKET_NAME,
+    filesEndpoint: `${apiUrl}/b2api/v2/b2_list_file_names` 
+  });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Configured bucket: ${B2_BUCKET_NAME}`);
 });
