@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize Storage client
-const storage = new Storage({
+
   projectId: process.env.GCP_PROJECT_ID,
   credentials: {
     client_email: process.env.GCP_CLIENT_EMAIL,
