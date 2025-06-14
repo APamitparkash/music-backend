@@ -1,13 +1,14 @@
 options:
-  logging: CLOUD_LOGGING_ONLY  # <<-- This fixes the error
+  logging: CLOUD_LOGGING_ONLY
+  serviceAccount: projects/music-462705/serviceAccounts/music-streaming-service@music-462705.iam.gserviceaccount.com
 
 steps:
-  # Build and deploy Node.js app
   - name: 'gcr.io/cloud-builders/npm'
     args: ['install']
-  
+
   - name: 'gcr.io/cloud-builders/gcloud'
     args: ['run', 'deploy', 'music-backend',
            '--source', '.',
            '--region', 'asia-south2',
-           '--platform', 'managed']
+           '--platform', 'managed',
+           '--allow-unauthenticated']
