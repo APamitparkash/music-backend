@@ -1,74 +1,107 @@
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Storage } = require('@google-cloud/storage');
+const multer = require('multer');
+const path = require('path');
 
 const app = express();
+const port = process.env.PORT || 3000;
+
+// Initialize Google Cloud Storage
+const storage = new Storage({
+  credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS)
+});
+const bucket = storage.bucket(process.env.GOOGLE_BUCKET_NAME);
+
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Initialize Storage client
-  const storage = new Storage({
-  projectId: process.env.GCP_PROJECT_ID,
-  credentials: {
-    client_email: process.env.GCP_CLIENT_EMAIL,
-    private_key: process.env.GCP_PRIVATE_KEY.replace(/\\n/g, '\n'),
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+});
+
+// API Endpoints
+
+// 1. List all songs
+app.get('/songs', async (req, res) => {
+  try {
+    const [files] = await bucket.getFiles();
+    const songs = files.map(file => ({
+      name: file.name,
+      url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
+      size: file.metadata.size,
+      lastModified: file.metadata.updated
+    }));
+    res.json(songs);
+  } catch (error) {
+    console.error('Error listing songs:', error);
+    res.status(500).json({ error: 'Failed to list songs' });
   }
 });
 
-const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.send('Music Backend is running!');
-  res.status(200).json({ status: 'healthy' });
-});
-
-// Search endpoint - now properly async
-app.get('/search', async (req, res) => {  // Added async here
+// 2. Search songs
+app.get('/search', async (req, res) => {
   try {
-    const query = req.query.q?.toLowerCase() || '';
-    const [files] = await bucket.getFiles();
+    const query = req.query.q || '';
+    const [files] = await bucket.getFiles({ prefix: query });
     
-    // Process files asynchronously
-    const results = await Promise.all(
-      files
-        .filter(file => file.name.toLowerCase().includes(query))
-        .map(async (file) => ({  // Added async here
-          name: file.name,
-          url: await generateSignedUrl(file.name),  // Now properly in async function
-          metadata: await getSongMetadata(file)  // Now properly in async function
-        }))
-    );
+    const results = files.map(file => ({
+      name: file.name,
+      url: `https://storage.googleapis.com/${bucket.name}/${file.name}`
+    }));
     
     res.json(results);
   } catch (error) {
     console.error('Search error:', error);
-    res.status(500).json({ error: 'Failed to search songs' });
+    res.status(500).json({ error: 'Search failed' });
   }
 });
 
-// Async helper functions
-async function generateSignedUrl(filename) {
-  const [url] = await bucket.file(filename).getSignedUrl({
-    action: 'read',
-    expires: Date.now() + 15 * 60 * 1000,
-    contentType: 'audio/mpeg'
-  });
-  return url;
-}
+// 3. Upload new song
+app.post('/upload', upload.single('song'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
 
-async function getSongMetadata(file) {
-  const [metadata] = await file.getMetadata();
-  return {
-    contentType: metadata.contentType,
-    size: metadata.size,
-    timeCreated: metadata.timeCreated,
-    updated: metadata.updated
-  };
-}
+    const fileName = req.file.originalname;
+    const file = bucket.file(fileName);
 
-const PORT = process.env.PORT || 8080;  // Default to 8080 for Cloud Run
-app.listen(PORT, '0.0.0.0', () => {    // Explicitly listen on all interfaces
-  console.log(`Server running on port ${PORT}`);
+    await file.save(req.file.buffer, {
+      metadata: {
+        contentType: req.file.mimetype,
+      },
+    });
+
+    res.json({
+      message: 'File uploaded successfully',
+      url: `https://storage.googleapis.com/${bucket.name}/${fileName}`
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
+
+// 4. Delete song
+app.delete('/songs/:name', async (req, res) => {
+  try {
+    const fileName = req.params.name;
+    await bucket.file(fileName).delete();
+    res.json({ message: 'File deleted successfully' });
+  } catch (error) {
+    console.error('Delete error:', error);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// Start server
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
