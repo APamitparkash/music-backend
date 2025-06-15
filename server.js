@@ -4,93 +4,111 @@ const cors = require('cors');
 const { Storage } = require('@google-cloud/storage');
 
 const app = express();
-const port = process.env.PORT || 10000; // Render works better with port 10000+
+const port = process.env.PORT || 10000; // Render prefers 10000+
 
 // ======================
-// GCP CONFIGURATION (OPTIMIZED FOR RENDER)
+// GCP CONFIGURATION (BULLETPROOF VERSION)
 // ======================
 const gcpCredentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
-// Fix newlines in private key
+// Critical: Fix private key formatting
 gcpCredentials.private_key = gcpCredentials.private_key.replace(/\\n/g, '\n');
 
 const storage = new Storage({
   projectId: gcpCredentials.project_id,
-  credentials: gcpCredentials
+  credentials: gcpCredentials,
+  retryOptions: {
+    autoRetry: true,
+    maxRetries: 3
+  }
 });
 
 const bucket = storage.bucket(process.env.GOOGLE_BUCKET_NAME);
 
-// Immediate connection test
-bucket.getFiles({ maxResults: 1 })
-  .then(() => console.log('✅ Successfully connected to GCS bucket:', bucket.name))
+// Enhanced connection test with explicit permission check
+async function verifyAccess() {
+  try {
+    // Test both bucket and object-level permissions
+    const [bucketExists] = await bucket.exists();
+    if (!bucketExists) throw new Error('Bucket does not exist');
+    
+    const [permissions] = await bucket.iam.testPermissions([
+      'storage.objects.list',
+      'storage.objects.get'
+    ]);
+    
+    console.log('✅ Verified permissions:', permissions);
+    return true;
+  } catch (err) {
+    console.error('❌ Access verification failed:', err.message);
+    throw err;
+  }
+}
+
+// Immediate verification on startup
+verifyAccess()
+  .then(() => console.log(`🚀 Connected to GCS bucket: ${bucket.name}`))
   .catch(err => {
-    console.error('❌ GCS Connection Error:', err.message);
+    console.error('FATAL: GCS connection failed');
+    console.error('Please verify:');
+    console.error(`1. Bucket exists: gs://${bucket.name}`);
+    console.error(`2. Service account ${gcpCredentials.client_email} has Storage Object Admin role`);
+    console.error(`3. Private key is properly formatted`);
     process.exit(1);
   });
 
 // ======================
-// MIDDLEWARE
+// API ENDPOINTS
 // ======================
 app.use(cors());
 app.use(express.json());
 
-// ======================
-// API ENDPOINTS (SIMPLIFIED & RELIABLE)
-// ======================
-
-// Health Check
 app.get('/', (req, res) => {
   res.json({
-    status: 'ready',
+    status: 'operational',
     bucket: bucket.name,
-    service: 'apmusicstream'
+    serviceAccount: gcpCredentials.client_email
   });
 });
 
-// Get All Songs
 app.get('/songs', async (req, res) => {
   try {
     const [files] = await bucket.getFiles();
-    const songs = files.map(file => ({
+    res.json(files.map(file => ({
       name: file.name.replace('.mp3', ''),
-      url: `https://storage.googleapis.com/${bucket.name}/${file.name}`
-    }));
-    res.json(songs);
+      url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
+      size: file.metadata.size
+    })));
   } catch (err) {
     console.error('GCS Error:', err);
-    res.status(500).json({ error: 'Failed to fetch songs' });
+    res.status(500).json({ 
+      error: 'Failed to fetch songs',
+      message: err.message
+    });
   }
 });
 
-// Search Songs
 app.get('/search', async (req, res) => {
-  const query = req.query.q || '';
-  
-  if (!query.trim()) {
-    return res.status(400).json({ error: 'Search query required' });
-  }
-
   try {
-    const [files] = await bucket.getFiles({ 
-      prefix: query.toLowerCase() // Case-insensitive search
+    const query = req.query.q || '';
+    const [files] = await bucket.getFiles({
+      prefix: query.toLowerCase()
     });
-
     res.json(files.map(file => ({
       name: file.name.replace('.mp3', ''),
       url: `https://storage.googleapis.com/${bucket.name}/${file.name}`
     })));
   } catch (err) {
-    res.status(500).json({ error: 'Search failed' });
+    res.status(500).json({ 
+      error: 'Search failed',
+      message: err.message
+    });
   }
 });
 
-// ======================
-// SERVER START
-// ======================
 app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
-  console.log(`🔗 Endpoints:`);
+  console.log(`Server running on port ${port}`);
+  console.log('Endpoints:');
   console.log(`- Health: http://localhost:${port}`);
   console.log(`- Songs: http://localhost:${port}/songs`);
   console.log(`- Search: http://localhost:${port}/search?q=example`);
