@@ -28,11 +28,25 @@ const upload = multer({
 
 // Helper function to get folders
 const getFolders = async () => {
-  const [files] = await bucket.getFiles({ delimiter: '/' });
-  return files.prefixes.map(folder => ({
-    name: folder.replace('/', ''),
-    path: folder
-  }));
+  try {
+    const [files] = await bucket.getFiles({ delimiter: '/' });
+    
+    // If no folders exist but songs exist in root
+    const [allFiles] = await bucket.getFiles();
+    const hasRootFiles = allFiles.some(file => !file.name.includes('/'));
+    
+    if ((!files.prefixes || files.prefixes.length === 0) && hasRootFiles) {
+      return [{ name: "All Songs", path: "" }];
+    }
+    
+    return files.prefixes ? files.prefixes.map(folder => ({
+      name: folder.replace('/', ''),
+      path: folder
+    })) : [];
+  } catch (error) {
+    console.error('Error getting folders:', error);
+    return [];
+  }
 };
 
 // API Endpoints
@@ -44,29 +58,36 @@ app.get('/genres', async (req, res) => {
     res.json(folders);
   } catch (error) {
     console.error('Error listing genres:', error);
-    res.status(500).json({ error: 'Failed to list genres' });
+    res.status(500).json({ 
+      error: 'Failed to list genres',
+      details: error.message 
+    });
   }
 });
 
-// 2. List songs in a genre folder
+// 2. List songs in a genre/folder
 app.get('/songs/:genre', async (req, res) => {
   try {
-    const prefix = `${req.params.genre}/`;
+    const prefix = req.params.genre === "All Songs" ? "" : `${req.params.genre}/`;
     const [files] = await bucket.getFiles({ prefix });
     
     const songs = files
-      .filter(file => file.name !== prefix) // Exclude the folder itself
+      .filter(file => !file.name.endsWith('/')) // Exclude folders
       .map(file => ({
         name: file.name.replace(prefix, ''),
         url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
         size: file.metadata.size,
-        lastModified: file.metadata.updated
+        lastModified: file.metadata.updated,
+        genre: req.params.genre
       }));
     
     res.json(songs);
   } catch (error) {
     console.error('Error listing songs:', error);
-    res.status(500).json({ error: 'Failed to list songs' });
+    res.status(500).json({ 
+      error: 'Failed to list songs',
+      details: error.message 
+    });
   }
 });
 
@@ -81,17 +102,20 @@ app.get('/search', async (req, res) => {
       .map(file => ({
         name: path.basename(file.name),
         url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
-        genre: file.name.split('/')[0] || 'Other'
+        genre: file.name.split('/')[0] || 'All Songs'
       }));
     
     res.json(results);
   } catch (error) {
     console.error('Search error:', error);
-    res.status(500).json({ error: 'Search failed' });
+    res.status(500).json({ 
+      error: 'Search failed',
+      details: error.message 
+    });
   }
 });
 
-// 4. Upload new song to a genre folder
+// 4. Upload new song
 app.post('/upload', upload.single('song'), async (req, res) => {
   try {
     if (!req.file) {
@@ -99,7 +123,7 @@ app.post('/upload', upload.single('song'), async (req, res) => {
     }
 
     const genre = req.body.genre || 'Other';
-    const fileName = `${genre}/${req.file.originalname}`;
+    const fileName = genre ? `${genre}/${req.file.originalname}` : req.file.originalname;
     const file = bucket.file(fileName);
 
     await file.save(req.file.buffer, {
@@ -114,8 +138,17 @@ app.post('/upload', upload.single('song'), async (req, res) => {
     });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Upload failed' });
+    res.status(500).json({ 
+      error: 'Upload failed',
+      details: error.message 
+    });
   }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Start server
