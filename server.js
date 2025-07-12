@@ -40,27 +40,6 @@ const getFolderStructure = (files) => {
   return Array.from(folders);
 };
 
-// Helper function to find thumbnail for a song or folder
-const findThumbnail = async (folder, songName) => {
-  try {
-    const prefix = songName ? `${folder}/${songName.replace(/\.mp3$/, '')}` : folder;
-    const [files] = await bucket.getFiles({ prefix });
-    
-    // Look for common image extensions
-    const imageExtensions = ['.jpg', '.jpeg', '.png'];
-    const thumbnailFile = files.find(file => 
-      imageExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
-    );
-    
-    return thumbnailFile 
-      ? `https://storage.googleapis.com/${bucket.name}/${thumbnailFile.name}`
-      : null;
-  } catch (error) {
-    console.error('Error finding thumbnail:', error);
-    return null;
-  }
-};
-
 // API Endpoints
 
 // 1. List all folders
@@ -68,16 +47,7 @@ app.get('/folders', async (req, res) => {
   try {
     const [files] = await bucket.getFiles();
     const folders = getFolderStructure(files);
-    
-    const foldersWithThumbnails = await Promise.all(
-      folders.map(async (name) => ({
-        name,
-        type: 'folder',
-        thumbnail: await findThumbnail(name)
-      }))
-    );
-    
-    res.json(foldersWithThumbnails);
+    res.json(folders);
   } catch (error) {
     console.error('Error listing folders:', error);
     res.status(500).json({ error: 'Failed to list folders' });
@@ -92,18 +62,15 @@ app.get('/songs/:folder?', async (req, res) => {
     
     const [files] = await bucket.getFiles({ prefix });
     
-    const songs = await Promise.all(
-      files
-        .filter(file => !file.name.endsWith('/') && file.name.toLowerCase().endsWith('.mp3'))
-        .map(async file => ({
-          name: path.basename(file.name),
-          url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
-          folder: folder || path.dirname(file.name).split('/')[0] || undefined,
-          size: file.metadata.size,
-          lastModified: file.metadata.updated,
-          thumbnail: await findThumbnail(folder || path.dirname(file.name).split('/')[0], path.basename(file.name))
-        }))
-    );
+    const songs = files
+      .filter(file => !file.name.endsWith('/')) // Exclude folder markers
+      .map(file => ({
+        name: path.basename(file.name),
+        url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
+        folder: folder || undefined,
+        size: file.metadata.size,
+        lastModified: file.metadata.updated
+      }));
     
     res.json(songs);
   } catch (error) {
@@ -118,19 +85,17 @@ app.get('/search', async (req, res) => {
     const query = req.query.q || '';
     const [files] = await bucket.getFiles();
     
-    const results = await Promise.all(
-      files
-        .filter(file => !file.name.endsWith('/') && file.name.toLowerCase().includes(query.toLowerCase()) && file.name.toLowerCase().endsWith('.mp3'))
-        .map(async file => {
-          const parts = file.name.split('/');
-          return {
-            name: parts[parts.length - 1],
-            url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
-            folder: parts.length > 1 ? parts[0] : undefined,
-            thumbnail: await findThumbnail(parts.length > 1 ? parts[0] : undefined, parts[parts.length - 1])
-          };
-        })
-    );
+    const results = files
+      .filter(file => !file.name.endsWith('/')) // Exclude folder markers
+      .filter(file => file.name.toLowerCase().includes(query.toLowerCase()))
+      .map(file => {
+        const parts = file.name.split('/');
+        return {
+          name: parts[parts.length - 1],
+          url: `https://storage.googleapis.com/${bucket.name}/${file.name}`,
+          folder: parts.length > 1 ? parts[0] : undefined
+        };
+      });
     
     res.json(results);
   } catch (error) {
@@ -139,23 +104,7 @@ app.get('/search', async (req, res) => {
   }
 });
 
-// 4. Get thumbnail for a folder or song
-app.get('/thumbnail/:path(*)', async (req, res) => {
-  try {
-    const path = req.params.path;
-    const thumbnail = await findThumbnail(path);
-    if (thumbnail) {
-      res.send(thumbnail);
-    } else {
-      res.status(404).send('Thumbnail not found');
-    }
-  } catch (error) {
-    console.error('Thumbnail fetch error:', error);
-    res.status(500).send('Failed to fetch thumbnail');
-  }
-});
-
-// 5. Upload new song
+// 4. Upload new song
 app.post('/upload', upload.single('song'), async (req, res) => {
   try {
     if (!req.file) {
@@ -184,7 +133,7 @@ app.post('/upload', upload.single('song'), async (req, res) => {
   }
 });
 
-// 6. Delete song
+// 5. Delete song
 app.delete('/songs/:name', async (req, res) => {
   try {
     const fileName = req.params.name;
@@ -196,7 +145,7 @@ app.delete('/songs/:name', async (req, res) => {
   }
 });
 
-// 7. Create new folder
+// 6. Create new folder
 app.post('/folders', async (req, res) => {
   try {
     const { folderName } = req.body;
@@ -204,6 +153,7 @@ app.post('/folders', async (req, res) => {
       return res.status(400).json({ error: 'Folder name is required' });
     }
 
+    // In GCS, folders are implicit, but we can create a dummy file
     const folderPath = `${folderName}/.keep`;
     const file = bucket.file(folderPath);
     await file.save('', { contentType: 'text/plain' });
